@@ -1,54 +1,77 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const dns = require('dns').promises;
 const { SMTPClient } = require('smtp-client');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-require('dotenv').config();
+const isValidEmail = email => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
-const isValidEmailFormat = (email) => {
-  const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return regex.test(email);
-};
-
-const verifyInbox = async (targetEmail) => {
-  const client = new SMTPClient({
-    host: 'smtp.hostinger.com',     // your own SMTP host
-    port: 465,                      // secure SMTP port
-    secure: true,                   // use TLS
-    timeout: 5000
-  });
-
+async function checkMX(domain) {
   try {
-    await client.connect();
-    await client.greet({ hostname: 'vorphix.com' });
-    await client.authLogin({      // use your SMTP credentials
-      username: 'start@vorphix.com',
-      password: 'Umer@208412'
-    });
-    await client.mail({ from: process.env.SMTP_USER });  // use your domain email
-    await client.rcpt({ to: targetEmail });              // target email to check
-    await client.quit();
-    return { valid: true, reason: 'Inbox exists and accepted RCPT TO' };
+    const records = await dns.resolveMx(domain);
+    return records.sort((a, b) => a.priority - b.priority);
   } catch (err) {
-    return { valid: false, reason: 'SMTP rejected email or mailbox does not exist' };
+    return [];
   }
-};
+}
+
+async function smtpVerify(email, mxHost) {
+  try {
+    const client = new SMTPClient({
+      host: mxHost,
+      port: 25,
+      timeout: 5000,
+    });
+
+    await client.connect();
+
+    // Use a real domain you own or control here
+    await client.greet({ hostname: 'vorphix.com' });
+
+    // Use an email address from a domain with proper SPF/DKIM (to avoid getting blocked)
+    await client.mail({ from: 'start@vorphix.com' });
+
+    const rcpt = await client.rcpt({ to: email });
+    await client.quit();
+
+    return { accepted: rcpt.code === 250 };
+  } catch (err) {
+    return { accepted: false };
+  }
+}
 
 app.post('/verify-email', async (req, res) => {
   const { email } = req.body;
-
-  if (!email || !isValidEmailFormat(email)) {
-    return res.status(400).json({ valid: false, reason: 'Invalid email format' });
+  if (!email || !isValidEmail(email)) {
+    return res.json({ valid: false, reason: 'Invalid email format' });
   }
 
-  const result = await verifyInbox(email);
-  return res.json(result);
+  const domain = email.split('@')[1];
+  const mxRecords = await checkMX(domain);
+  if (mxRecords.length === 0) {
+    return res.json({ valid: false, reason: 'No MX record—domain cannot receive email' });
+  }
+
+  // Check for catch-all behavior
+  const fake = `no-user-${Date.now()}@${domain}`;
+  const fakeResult = await smtpVerify(fake, mxRecords[0].exchange);
+  const isCatchAll = fakeResult.accepted;
+
+  const realResult = await smtpVerify(email, mxRecords[0].exchange);
+
+  if (realResult.accepted && !isCatchAll) {
+    return res.json({ valid: true, reason: 'SMTP accepted RCPT TO — mailbox likely exists' });
+  } else if (isCatchAll) {
+    return res.json({ valid: null, reason: 'Catch-all domain — cannot confirm specific mailbox' });
+  } else {
+    return res.json({ valid: false, reason: 'SMTP rejected RCPT TO' });
+  }
 });
 
 app.listen(3000, () => {
-  console.log('Email verifier running on port 3000');
+  console.log('✅ Email verifier running on http://localhost:3000');
 });
