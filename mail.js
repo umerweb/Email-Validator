@@ -26,8 +26,8 @@ const verifyInbox = async (targetEmail) => {
     await client.connect();
     await client.greet({ hostname: 'vorphix.com' });
     await client.authLogin({      // use your SMTP credentials
-      username: process.env.SMTP_USER,
-      password: process.env.SMTP_PASS
+      username: 'start@vorphix.com',
+      password: 'Umer@208412'
     });
     await client.mail({ from: process.env.SMTP_USER });  // use your domain email
     await client.rcpt({ to: targetEmail });              // target email to check
